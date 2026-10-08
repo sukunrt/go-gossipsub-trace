@@ -12,10 +12,11 @@ import (
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
-	pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p-pubsub/partialmessages"
+	pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/x/simlibp2p"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sukunrt/go-gossipsub-trace/internal/gossipsubsim"
 	"google.golang.org/protobuf/proto"
@@ -197,5 +198,91 @@ func TestSimnetPartialAndFullPeers(t *testing.T) {
 			}
 		}
 		t.Fatalf("missing topic log: %s", logs[publisher].String())
+	})
+}
+
+// On a slow link, send counts stream writes and lags queue.
+func TestSimnetSendLagsQueue(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previous)
+	synctest.Test(t, func(t *testing.T) {
+		const topicName = "blocks"
+		const publisher, receiver, messages = 0, 1, 10
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		tracers := make([]*Tracer, 2)
+		for i := range tracers {
+			tracers[i], _ = newTestTracer(t, Config{LogInterval: time.Hour})
+		}
+		params := pubsub.DefaultGossipSubParams()
+		params.HeartbeatInitialDelay = 20 * time.Millisecond
+		params.HeartbeatInterval = 100 * time.Millisecond
+		sim, err := gossipsubsim.New(ctx, gossipsubsim.Config{
+			Nodes:         2,
+			BitsPerSecond: simlibp2p.OneMbps,
+			PubSubOptions: []pubsub.Option{pubsub.WithGossipSubParams(params)},
+			NodeOptions: func(i int, _ host.Host) []pubsub.Option {
+				return []pubsub.Option{pubsub.WithRawTracer(tracers[i])}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sim.Close()
+
+		topics := make([]*pubsub.Topic, 2)
+		subs := make([]*pubsub.Subscription, 2)
+		for i, node := range sim.Nodes {
+			if topics[i], err = node.PubSub.Join(topicName); err != nil {
+				t.Fatal(err)
+			}
+			if subs[i], err = topics[i].Subscribe(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := sim.Connect(ctx, publisher, receiver); err != nil {
+			t.Fatal(err)
+		}
+		for len(topics[publisher].ListPeers()) != 1 {
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(3 * params.HeartbeatInterval)
+
+		count := func(node int, e event, k kind) uint64 {
+			_, topics := tracers[node].snapshotAll()
+			return topics[topicKey{event: e, kind: k, topic: topicName}].bytes
+		}
+		// Subscriptions go in the hello packet, which skips the queue.
+		if count(publisher, send, subscribe) == 0 || count(publisher, queue, subscribe) != 0 {
+			t.Errorf("hello subscriptions: send %d, queue %d", count(publisher, send, subscribe), count(publisher, queue, subscribe))
+		}
+
+		for i := range messages {
+			if err := topics[publisher].Publish(ctx, bytes.Repeat([]byte{byte(i)}, 50_000)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(time.Millisecond)
+		queued, sent := count(publisher, queue, publish), count(publisher, send, publish)
+		if queued < messages*50_000 || sent >= queued {
+			t.Errorf("after publish: queued %d, sent %d", queued, sent)
+		}
+
+		for range messages {
+			if _, err := subs[receiver].Next(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		time.Sleep(3 * params.HeartbeatInterval)
+		if err := sim.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for _, tracer := range tracers {
+			_ = tracer.Close()
+		}
+		sent = count(publisher, send, publish)
+		if sent != queued || count(receiver, recv, publish) != sent {
+			t.Errorf("after delivery: queued %d, sent %d, received %d", queued, sent, count(receiver, recv, publish))
+		}
 	})
 }

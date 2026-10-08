@@ -95,13 +95,16 @@ One `msg="gossipsub bandwidth"` line is emitted per interval, including idle
 intervals. Each line contains:
 
 - `interval_ms`: actual elapsed time for this window.
-- `recv_bytes`, `send_bytes`, `drop_bytes`: byte deltas for the window.
-- `recv_rpcs`, `send_rpcs`, `drop_rpcs`: RPC counts for the window.
-- `recv_bytes_per_second`, `send_bytes_per_second`, `drop_bytes_per_second`:
+- `recv_bytes`, `queue_bytes`, `send_bytes`, `drop_bytes`: byte deltas for the
+  window.
+- `recv_rpcs`, `queue_rpcs`, `send_rpcs`, `drop_rpcs`: RPC counts for the window.
+- `recv_bytes_per_second`, `queue_bytes_per_second`, `send_bytes_per_second`,
+  `drop_bytes_per_second`:
   window bytes divided by actual elapsed seconds. Dropped bytes describe unsent
   traffic.
 - `recv_ihave_bytes`, `send_ihave_bytes`, `recv_iwant_bytes`,
-  `send_iwant_bytes`, and the corresponding dropped fields, even when zero.
+  `send_iwant_bytes`, and the corresponding queued and dropped fields, even
+  when zero.
 - The same per-kind byte fields for other active kinds, such as
   `send_publish_bytes` and `recv_idontwant_bytes`.
 - `<event>_pm_total_bytes`, `<event>_pm_message_bytes`,
@@ -134,7 +137,7 @@ use the elapsed time. `Close` waits for pending logging to finish.
 | `gossipsub_pm_metadata_bytes_total` | `event`, `topic` | Raw `partsMetadata` bytes |
 | `gossipsub_pm_header_bytes_total` | `event`, `topic` | Raw `topicID` + `groupID` bytes |
 
-`event` is `recv`, `send`, or `drop`. `kind` is `publish`, `subscribe`,
+`event` is `recv`, `queue`, `send`, or `drop`. `kind` is `publish`, `subscribe`,
 `unsubscribe`, `ihave`, `iwant`, `idontwant`, `graft`, `prune`, `partial`, `overhead`, or
 `other`. The last two kinds only have byte counters. An IHAVE entry advertising
 100 IDs counts as one message and 100 message IDs. Repeated IDs and copies sent
@@ -168,10 +171,10 @@ included; they stay in `subscribe`, `unsubscribe`, and `other`.
 
 ## Measurement semantics
 
-The tracer uses `RecvRPC`, `SendRPC`, and `DropRPC`, which expose the complete
-protobuf RPC. It computes sizes without serializing or retaining the message.
-The high-level `EventTracer` only exposes selected metadata and cannot supply
-the complete published-message size.
+The tracer uses `RecvRPC`, `SendRPC`, `SendRPCCompleted`, and `DropRPC`, which
+expose the complete protobuf RPC. It computes sizes without serializing or retaining
+the message. The high-level `EventTracer` only exposes selected metadata and
+cannot supply the complete published-message size.
 
 Total bytes are `proto.Size(rpc) + unsigned-varint-length-prefix-size`. Each
 known message is charged its protobuf payload, field tag, and length prefix.
@@ -183,9 +186,15 @@ as well as the application payload in its existing encoding.
 
 These are estimates of RPC traffic observed by the hooks:
 
-- `SendRPC` fires after enqueueing, before the stream write completes. A later
-  write failure cannot be determined from this hook. `DropRPC` is kept separate
-  and never added to sent bytes.
+- `SendRPC` (`queue`) fires when pubsub adds the RPC to the peer's outbound
+  queue. `SendRPCCompleted` (`send`) fires when the stream write returns, on
+  the peer's writer goroutine. The transport can still buffer those bytes.
+  Failed writes are not counted. `queue` minus `send` is the queue backlog, plus RPCs lost
+  when a peer disconnects.
+- The hello packet (initial subscriptions) skips the queue. It is in `send`,
+  not in `queue`.
+- `DropRPC` (`drop`) fires when pubsub does not enqueue the RPC: queue full, no
+  queue, or oversized. It is never added to `queue` or `send`.
 - `RecvRPC` receives parsed RPCs. Malformed frames and RPCs rejected before the
   hook (for example, by an application RPC inspector) are outside its coverage.
   Re-encoded sizes can differ from noncanonical incoming protobuf encodings.
@@ -196,8 +205,10 @@ These are estimates of RPC traffic observed by the hooks:
 - Message validation, delivery, duplicate detection, and mesh callbacks do not
   increment bandwidth, so processing a received message cannot count it twice.
 
-The module targets go-libp2p-pubsub v0.17.0. For development against a local
-checkout, use a Go workspace or a main-module `replace` directive.
+The module needs go-libp2p-pubsub with the optional `SendRPCCompletedTracer`
+hook. Upstream v0.17.0 and v0.18.0 do not have it, so the module does not build
+with them. `go.mod` replaces pubsub with `../go-libp2p-pubsub`: v0.18.0 plus
+that change.
 
 ## Simnet simulation
 
@@ -271,4 +282,5 @@ Go's fake-time `testing/synctest` environment.
 
 `simnet_test.go` runs a publisher, a partial-message peer, and a classic peer
 over simnet. On one topic, it checks the full-message and partial-message bytes
-on the sender and on each receiver.
+on the sender and on each receiver. A second test publishes 500 KB over a
+1 Mbps link and checks that `send` lags `queue` until the queue drains.

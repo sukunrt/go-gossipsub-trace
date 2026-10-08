@@ -38,12 +38,13 @@ type event int
 
 const (
 	recv event = iota
+	queue
 	send
 	drop
 	eventCount
 )
 
-var eventNames = [eventCount]string{"recv", "send", "drop"}
+var eventNames = [eventCount]string{"recv", "queue", "send", "drop"}
 
 type counters struct {
 	rpcs       uint64
@@ -61,9 +62,10 @@ type totals [eventCount]counters
 // separately. They never modify RPCs or messages. Message ID/topic mappings
 // expire after MessageIDRetention and are periodically removed.
 //
-// SendRPC observes queued sends, not completed stream writes. Byte counts are
-// estimates of protobuf RPC bytes plus their unsigned-varint length prefix;
-// they exclude transport, encryption, and stream multiplexing overhead.
+// SendRPC observes RPCs added to a peer's outbound queue. SendRPCCompleted
+// observes RPCs written to the peer's stream. Byte counts are estimates of protobuf RPC
+// bytes plus their unsigned-varint length prefix; they exclude transport,
+// encryption, and stream multiplexing overhead.
 type Tracer struct {
 	mu      sync.Mutex
 	totals  totals
@@ -93,8 +95,9 @@ type Tracer struct {
 }
 
 var (
-	_ pubsub.RawTracer     = (*Tracer)(nil)
-	_ prometheus.Collector = (*Tracer)(nil)
+	_ pubsub.RawTracer              = (*Tracer)(nil)
+	_ pubsub.SendRPCCompletedTracer = (*Tracer)(nil)
+	_ prometheus.Collector          = (*Tracer)(nil)
 )
 
 // New registers the metrics and starts periodic logging. Registration errors
@@ -122,7 +125,7 @@ func New(cfg Config) (*Tracer, error) {
 		cacheDone: make(chan struct{}), topics: newTopicCache(),
 		byTopic: make(map[topicKey]topicCounters), idFn: cfg.MessageIDFn,
 		rpcBytes: prometheus.NewDesc("gossipsub_rpc_bytes_total",
-			"Estimated encoded RPC bytes including length prefixes; send means queued and drop means unsent.", []string{"event"}, nil),
+			"Estimated encoded RPC bytes including length prefixes; queue means enqueued, send means written to the stream, and drop means not enqueued.", []string{"event"}, nil),
 		rpcs: prometheus.NewDesc("gossipsub_rpcs_total",
 			"RPCs observed by the tracer, including empty RPCs.", []string{"event"}, nil),
 		kindBytes: prometheus.NewDesc("gossipsub_message_bytes_total",
@@ -322,9 +325,10 @@ func pmAttrs(prefix string, total uint64, pm pmBytes) []slog.Attr {
 	}
 }
 
-func (t *Tracer) RecvRPC(rpc *pubsub.RPC)            { t.record(recv, rpc) }
-func (t *Tracer) SendRPC(rpc *pubsub.RPC, _ peer.ID) { t.record(send, rpc) }
-func (t *Tracer) DropRPC(rpc *pubsub.RPC, _ peer.ID) { t.record(drop, rpc) }
+func (t *Tracer) RecvRPC(rpc *pubsub.RPC)                     { t.record(recv, rpc) }
+func (t *Tracer) SendRPC(rpc *pubsub.RPC, _ peer.ID)          { t.record(queue, rpc) }
+func (t *Tracer) SendRPCCompleted(rpc *pubsub.RPC, _ peer.ID) { t.record(send, rpc) }
+func (t *Tracer) DropRPC(rpc *pubsub.RPC, _ peer.ID)          { t.record(drop, rpc) }
 
 // These hooks describe message processing or mesh state, not additional bytes.
 func (*Tracer) OnNewOutboundStream(peer.ID, protocol.ID) {}

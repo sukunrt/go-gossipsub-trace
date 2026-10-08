@@ -60,7 +60,8 @@ func TestRPCMetricsAndNoDoubleCounting(t *testing.T) {
 	rpc := mixedRPC()
 	tracer.RecvRPC(rpc)
 	tracer.SendRPC(rpc, "peer")
-	tracer.SendRPC(rpc, "another-peer")
+	tracer.SendRPCCompleted(rpc, "peer")
+	tracer.SendRPCCompleted(rpc, "another-peer")
 	tracer.DropRPC(rpc, "peer")
 	tracer.RecvRPC(nil)
 	tracer.ValidateMessage(nil)
@@ -77,7 +78,7 @@ func TestRPCMetricsAndNoDoubleCounting(t *testing.T) {
 	tracer.UndeliverableMessage(nil)
 	frame := encoded(t, &rpc.RPC)
 	size := float64(len(frame) + prefixLen(len(frame)))
-	for event, count := range map[string]float64{"recv": 1, "send": 2, "drop": 1} {
+	for event, count := range map[string]float64{"recv": 1, "queue": 1, "send": 2, "drop": 1} {
 		assertMetric(t, registry, "gossipsub_rpcs_total", map[string]string{"event": event}, count)
 		assertMetric(t, registry, "gossipsub_rpc_bytes_total", map[string]string{"event": event}, count*size)
 		assertMetric(t, registry, "gossipsub_messages_total", map[string]string{"event": event, "kind": "ihave"}, count*2)
@@ -102,6 +103,7 @@ func TestConcurrentCallbacksAndScrapes(t *testing.T) {
 			for range iterations {
 				tracer.RecvRPC(rpc)
 				tracer.SendRPC(rpc, "peer")
+				tracer.SendRPCCompleted(rpc, "peer")
 				tracer.DropRPC(rpc, "peer")
 			}
 		})
@@ -122,7 +124,7 @@ func TestConcurrentCallbacksAndScrapes(t *testing.T) {
 	}
 	wg.Wait()
 	before := tracer.snapshot()
-	tracer.SendRPC(mixedRPC(), "peer")
+	tracer.SendRPCCompleted(mixedRPC(), "peer")
 	if tracer.snapshot() != before {
 		t.Fatal("callback changed counters after Close")
 	}
@@ -182,7 +184,7 @@ func TestPeriodicTextLogsUseWindowDeltas(t *testing.T) {
 			tracer, _ := newTestTracer(t, Config{
 				LogInterval: interval, Logger: slog.New(slog.NewTextHandler(lines, nil)),
 			})
-			tracer.SendRPC(mixedRPC(), "peer")
+			tracer.SendRPCCompleted(mixedRPC(), "peer")
 			first := nextLine(t, lines)
 			if !strings.Contains(first, `msg="gossipsub bandwidth"`) {
 				t.Fatalf("unexpected text log: %s", first)

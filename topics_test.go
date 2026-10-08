@@ -35,7 +35,7 @@ func TestIWantMixedTopicsAndUnknownIDs(t *testing.T) {
 	tracer, registry := newTestTracer(t, Config{})
 	tracer.RecvRPC(advertisement("blocks", "a"))
 	tracer.RecvRPC(advertisement("attestations", "bbb"))
-	tracer.SendRPC(request("a", "bbb", "missing", "a"), "peer")
+	tracer.SendRPCCompleted(request("a", "bbb", "missing", "a"), "peer")
 
 	// ID fields occupy 3, 5, 9, and 3 bytes. Divide the complete 22-byte
 	// IWANT entry proportionally, including its two framing bytes.
@@ -51,7 +51,7 @@ func TestIWantMixedTopicsAndUnknownIDs(t *testing.T) {
 
 func TestIncomingIWantUsesSentIHave(t *testing.T) {
 	tracer, registry := newTestTracer(t, Config{})
-	tracer.SendRPC(advertisement("blocks", "id"), "peer")
+	tracer.SendRPCCompleted(advertisement("blocks", "id"), "peer")
 	tracer.RecvRPC(request("id"))
 	assertTopicMetric(t, registry, "gossipsub_topic_message_ids_total", "recv", "iwant", "blocks", 1)
 	assertTopicSums(t, tracer)
@@ -81,7 +81,7 @@ func TestConflictingTopicsAreUnattributed(t *testing.T) {
 	tracer, registry := newTestTracer(t, Config{})
 	tracer.RecvRPC(advertisement("blocks", "id"))
 	tracer.RecvRPC(advertisement("attestations", "id"))
-	tracer.SendRPC(request("id"), "peer")
+	tracer.SendRPCCompleted(request("id"), "peer")
 	assertTopicMetric(t, registry, "gossipsub_topic_message_ids_total", "send", "iwant", "", 1)
 }
 
@@ -104,7 +104,7 @@ func TestPublishedAndProcessedMessagesTeachTopics(t *testing.T) {
 			} else {
 				tracer.RecvRPC(&pubsub.RPC{RPC: pb.RPC{Publish: []*pb.Message{msg, nil}}})
 			}
-			tracer.SendRPC(request(id), "peer")
+			tracer.SendRPCCompleted(request(id), "peer")
 			assertTopicMetric(t, registry, "gossipsub_topic_message_ids_total", "send", "iwant", "blocks", 1)
 			if name == "cached" && tracer.snapshot()[recv].bytes != 0 {
 				t.Fatal("message processing added bandwidth")
@@ -137,7 +137,7 @@ func TestTopicByteConservationForAllKinds(t *testing.T) {
 	rpc.Partial = &pb.PartialMessagesExtension{PartialMessage: []byte("extension")}
 	rpc.Control.Iwant = append(rpc.Control.Iwant, nil, &pb.ControlIWant{})
 	tracer.RecvRPC(rpc)
-	tracer.SendRPC(rpc, "peer")
+	tracer.SendRPCCompleted(rpc, "peer")
 	tracer.DropRPC(rpc, "peer")
 	assertTopicSums(t, tracer)
 }
@@ -148,7 +148,7 @@ func TestTopicBandwidthTextLogs(t *testing.T) {
 		LogInterval: time.Hour, Logger: slog.New(slog.NewTextHandler(&output, nil)),
 	})
 	tracer.RecvRPC(advertisement("blocks", "id"))
-	tracer.SendRPC(request("id"), "peer")
+	tracer.SendRPCCompleted(request("id"), "peer")
 	_ = tracer.Close()
 	for _, line := range strings.Split(output.String(), "\n") {
 		if strings.Contains(line, `msg="gossipsub topic bandwidth"`) && strings.Contains(line, "topic=blocks event=send") {
@@ -167,8 +167,8 @@ func TestPartialMessageMetricsAndLogs(t *testing.T) {
 		LogInterval: time.Hour, Logger: slog.New(slog.NewTextHandler(&output, nil)),
 	})
 	rpc := partialRPC()
-	tracer.SendRPC(rpc, "peer")
-	tracer.SendRPC(rpc, "another-peer")
+	tracer.SendRPCCompleted(rpc, "peer")
+	tracer.SendRPCCompleted(rpc, "another-peer")
 	total := float64(measureRPC(rpc).kindBytes[partial])
 	labels := map[string]string{"event": "send", "topic": "blocks"}
 	for name, want := range map[string]float64{
@@ -234,7 +234,7 @@ func TestExpiredIDsAreUnattributedBeforeNextSweep(t *testing.T) {
 		time.Sleep(time.Second)
 		tracer.RecvRPC(advertisement("blocks", "id"))
 		time.Sleep(MessageIDRetention)
-		tracer.SendRPC(request("id"), "peer")
+		tracer.SendRPCCompleted(request("id"), "peer")
 		assertTopicMetric(t, registry, "gossipsub_topic_message_ids_total", "send", "iwant", "", 1)
 	})
 }
