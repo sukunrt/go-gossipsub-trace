@@ -161,6 +161,47 @@ func TestTopicBandwidthTextLogs(t *testing.T) {
 	t.Fatalf("missing per-topic IWANT log: %s", output.String())
 }
 
+func TestPartialMessageMetricsAndLogs(t *testing.T) {
+	var output bytes.Buffer
+	tracer, registry := newTestTracer(t, Config{
+		LogInterval: time.Hour, Logger: slog.New(slog.NewTextHandler(&output, nil)),
+	})
+	rpc := partialRPC()
+	tracer.SendRPC(rpc, "peer")
+	tracer.SendRPC(rpc, "another-peer")
+	total := float64(measureRPC(rpc).kindBytes[partial])
+	labels := map[string]string{"event": "send", "topic": "blocks"}
+	for name, want := range map[string]float64{
+		"gossipsub_pm_bytes_total": 2 * total, "gossipsub_pm_message_bytes_total": 600,
+		"gossipsub_pm_metadata_bytes_total": 8, "gossipsub_pm_header_bytes_total": 22,
+	} {
+		assertMetric(t, registry, name, labels, want)
+	}
+	assertTopicMetric(t, registry, "gossipsub_topic_message_bytes_total", "send", "partial", "blocks", 2*total)
+	assertMetric(t, registry, "gossipsub_messages_total", map[string]string{"event": "send", "kind": "partial"}, 2)
+	assertTopicSums(t, tracer)
+
+	_ = tracer.Close()
+	var summary, topic string
+	for _, line := range strings.Split(output.String(), "\n") {
+		switch {
+		case strings.Contains(line, `msg="gossipsub bandwidth"`):
+			summary = line
+		case strings.Contains(line, "topic=blocks event=send"):
+			topic = line
+		}
+	}
+	for prefix, line := range map[string]string{"send_": summary, "": topic} {
+		for field, want := range map[string]float64{
+			"pm_total_bytes": 2 * total, "pm_message_bytes": 600, "pm_metadata_bytes": 8, "pm_header_bytes": 22,
+		} {
+			if got := logNumber(t, line, prefix+field); got != want {
+				t.Errorf("%s%s = %v, want %v: %s", prefix, field, got, want, line)
+			}
+		}
+	}
+}
+
 func TestCacheSweepRunsEveryTenSeconds(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tracer, _ := newTestTracer(t, Config{LogInterval: time.Hour})

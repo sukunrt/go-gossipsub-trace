@@ -51,6 +51,7 @@ type counters struct {
 	kindBytes  [kindCount]uint64
 	messages   [kindCount]uint64
 	messageIDs [kindCount]uint64
+	pm         pmBytes
 }
 
 type totals [eventCount]counters
@@ -85,6 +86,10 @@ type Tracer struct {
 	messageIDs      *prometheus.Desc
 	topicBytes      *prometheus.Desc
 	topicMessageIDs *prometheus.Desc
+	pmTotalBytes    *prometheus.Desc
+	pmMessageBytes  *prometheus.Desc
+	pmMetadataBytes *prometheus.Desc
+	pmHeaderBytes   *prometheus.Desc
 }
 
 var (
@@ -130,6 +135,14 @@ func New(cfg Config) (*Tracer, error) {
 			"Estimated RPC bytes by kind and topic; empty topic denotes unattributed or shared bytes.", []string{"event", "kind", "topic"}, nil),
 		topicMessageIDs: prometheus.NewDesc("gossipsub_topic_message_ids_total",
 			"IHAVE, IWANT, and IDONTWANT IDs by topic; empty topic denotes unknown or ambiguous IDs.", []string{"event", "kind", "topic"}, nil),
+		pmTotalBytes: prometheus.NewDesc("gossipsub_pm_bytes_total",
+			"Encoded partial-message extension bytes, including field tags and lengths.", []string{"event", "topic"}, nil),
+		pmMessageBytes: prometheus.NewDesc("gossipsub_pm_message_bytes_total",
+			"Raw partialMessage bytes.", []string{"event", "topic"}, nil),
+		pmMetadataBytes: prometheus.NewDesc("gossipsub_pm_metadata_bytes_total",
+			"Raw partsMetadata bytes.", []string{"event", "topic"}, nil),
+		pmHeaderBytes: prometheus.NewDesc("gossipsub_pm_header_bytes_total",
+			"Raw partial-message topicID and groupID bytes.", []string{"event", "topic"}, nil),
 	}
 	if err := cfg.Registerer.Register(t); err != nil {
 		return nil, err
@@ -180,11 +193,15 @@ func (t *Tracer) record(e event, rpc *pubsub.RPC) {
 		c := t.byTopic[key]
 		c.bytes += bytes
 		c.ids += ids
+		if k == partial {
+			c.pm.add(n.pm)
+		}
 		t.byTopic[key] = c
 	})
 	c := &t.totals[e]
 	c.rpcs++
 	c.bytes += n.bytes
+	c.pm.add(n.pm)
 	for k := kind(0); k < kindCount; k++ {
 		c.kindBytes[k] += n.kindBytes[k]
 		c.messages[k] += n.messages[k]
@@ -206,6 +223,10 @@ func (t *Tracer) Describe(ch chan<- *prometheus.Desc) {
 	ch <- t.messageIDs
 	ch <- t.topicBytes
 	ch <- t.topicMessageIDs
+	ch <- t.pmTotalBytes
+	ch <- t.pmMessageBytes
+	ch <- t.pmMetadataBytes
+	ch <- t.pmHeaderBytes
 }
 
 func (t *Tracer) Collect(ch chan<- prometheus.Metric) {
@@ -228,6 +249,13 @@ func (t *Tracer) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(t.topicBytes, prometheus.CounterValue, float64(c.bytes), eventNames[key.event], kindNames[key.kind], key.topic)
 		if key.kind == ihave || key.kind == iwant || key.kind == idontwant {
 			ch <- prometheus.MustNewConstMetric(t.topicMessageIDs, prometheus.CounterValue, float64(c.ids), eventNames[key.event], kindNames[key.kind], key.topic)
+		}
+		if key.kind == partial {
+			labels := []string{eventNames[key.event], key.topic}
+			ch <- prometheus.MustNewConstMetric(t.pmTotalBytes, prometheus.CounterValue, float64(c.bytes), labels...)
+			ch <- prometheus.MustNewConstMetric(t.pmMessageBytes, prometheus.CounterValue, float64(c.pm.message), labels...)
+			ch <- prometheus.MustNewConstMetric(t.pmMetadataBytes, prometheus.CounterValue, float64(c.pm.metadata), labels...)
+			ch <- prometheus.MustNewConstMetric(t.pmHeaderBytes, prometheus.CounterValue, float64(c.pm.header), labels...)
 		}
 	}
 }
@@ -280,8 +308,18 @@ func (t *Tracer) logWindow(current, previous totals, elapsed time.Duration, fina
 				attrs = append(attrs, slog.Uint64(prefix+name+"_bytes", delta))
 			}
 		}
+		attrs = append(attrs, pmAttrs(prefix, c.kindBytes[partial]-previous[e].kindBytes[partial], c.pm.minus(previous[e].pm))...)
 	}
 	t.logger.LogAttrs(context.Background(), slog.LevelInfo, "gossipsub bandwidth", attrs...)
+}
+
+func pmAttrs(prefix string, total uint64, pm pmBytes) []slog.Attr {
+	return []slog.Attr{
+		slog.Uint64(prefix+"pm_total_bytes", total),
+		slog.Uint64(prefix+"pm_message_bytes", pm.message),
+		slog.Uint64(prefix+"pm_metadata_bytes", pm.metadata),
+		slog.Uint64(prefix+"pm_header_bytes", pm.header),
+	}
 }
 
 func (t *Tracer) RecvRPC(rpc *pubsub.RPC)            { t.record(recv, rpc) }

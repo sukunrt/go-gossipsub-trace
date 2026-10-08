@@ -5,7 +5,8 @@
 
 A `pubsub.RawTracer` that measures GossipSub RPC bandwidth, exports Prometheus
 counters, and writes periodic text summaries with topic attribution. IHAVE,
-IWANT, IDONTWANT, published messages, subscriptions, GRAFT, and PRUNE are included.
+IWANT, IDONTWANT, published messages, subscriptions, GRAFT, PRUNE, and partial
+messages are included.
 
 ## Usage
 
@@ -103,10 +104,14 @@ intervals. Each line contains:
   `send_iwant_bytes`, and the corresponding dropped fields, even when zero.
 - The same per-kind byte fields for other active kinds, such as
   `send_publish_bytes` and `recv_idontwant_bytes`.
+- `<event>_pm_total_bytes`, `<event>_pm_message_bytes`,
+  `<event>_pm_metadata_bytes`, `<event>_pm_header_bytes`: partial-message
+  bytes, even when zero. See [Partial messages](#partial-messages).
 
 Each active topic/event pair also gets a `msg="gossipsub topic bandwidth"` line
 with `topic`, `event`, `interval_ms`, `bytes`, `bytes_per_second`, and the active
-per-kind byte fields, such as `iwant_bytes`. These are interval deltas as well;
+per-kind byte fields, such as `iwant_bytes`. Topics with partial messages also
+get the four `pm_*` fields. These are interval deltas as well;
 inactive topics emit no extra lines.
 
 Logging happens in its own goroutine. A slow log writer cannot stall tracer
@@ -124,9 +129,13 @@ use the elapsed time. `Close` waits for pending logging to finish.
 | `gossipsub_message_ids_total` | `event`, `kind` | IDs carried in IHAVE/IWANT/IDONTWANT |
 | `gossipsub_topic_message_bytes_total` | `event`, `kind`, `topic` | Byte breakdown attributed to topics |
 | `gossipsub_topic_message_ids_total` | `event`, `kind`, `topic` | IHAVE/IWANT/IDONTWANT IDs attributed to topics |
+| `gossipsub_pm_bytes_total` | `event`, `topic` | Encoded partial-message extension bytes |
+| `gossipsub_pm_message_bytes_total` | `event`, `topic` | Raw `partialMessage` bytes |
+| `gossipsub_pm_metadata_bytes_total` | `event`, `topic` | Raw `partsMetadata` bytes |
+| `gossipsub_pm_header_bytes_total` | `event`, `topic` | Raw `topicID` + `groupID` bytes |
 
 `event` is `recv`, `send`, or `drop`. `kind` is `publish`, `subscribe`,
-`unsubscribe`, `ihave`, `iwant`, `idontwant`, `graft`, `prune`, `overhead`, or
+`unsubscribe`, `ihave`, `iwant`, `idontwant`, `graft`, `prune`, `partial`, `overhead`, or
 `other`. The last two kinds only have byte counters. An IHAVE entry advertising
 100 IDs counts as one message and 100 message IDs. Repeated IDs and copies sent
 to multiple peers are counted each time they appear.
@@ -142,6 +151,21 @@ sum by (topic, kind) (
 Prometheus counters are cumulative and updated on every callback, independently
 of logging. Scrape at your usual interval; text logs provide the 50–100 ms view.
 
+## Partial messages
+
+The `partial` kind is the encoded `RPC.partial` field: field tag, length prefix,
+and the complete `PartialMessagesExtension`, including its inner tags and
+lengths. The `topic` label is the extension's `topicID`.
+
+- `pm_total_bytes` (`gossipsub_pm_bytes_total`): same value as the `partial` kind.
+- `pm_message_bytes`: raw `partialMessage` value bytes.
+- `pm_metadata_bytes`: raw `partsMetadata` value bytes.
+- `pm_header_bytes`: raw `topicID` plus `groupID` value bytes.
+
+The three raw fields exclude protobuf framing, so they sum to less than the
+total. Partial-message flags in `SubOpts` and `ControlExtensions` are not
+included; they stay in `subscribe`, `unsubscribe`, and `other`.
+
 ## Measurement semantics
 
 The tracer uses `RecvRPC`, `SendRPC`, and `DropRPC`, which expose the complete
@@ -152,7 +176,8 @@ the complete published-message size.
 Total bytes are `proto.Size(rpc) + unsigned-varint-length-prefix-size`. Each
 known message is charged its protobuf payload, field tag, and length prefix.
 The RPC length prefix and shared control-envelope framing go to `overhead`;
-extension fields and unknown fields go to `other`. The kinds sum to the full
+the partial-message extension goes to `partial`; other extension fields and
+unknown fields go to `other`. The kinds sum to the full
 RPC byte estimate. Published-message bytes include topic and signature fields,
 as well as the application payload in its existing encoding.
 
@@ -243,3 +268,7 @@ and cover concurrent callbacks, scrapes, slow log writers, and shutdown. Topic
 tests cover mixed requests, unknown/conflicting IDs, custom ID functions, exact
 byte conservation, ordered cache refresh, expiry, and periodic cleanup using
 Go's fake-time `testing/synctest` environment.
+
+`simnet_test.go` runs a publisher, a partial-message peer, and a classic peer
+over simnet. On one topic, it checks the full-message and partial-message bytes
+on the sender and on each receiver.

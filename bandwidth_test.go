@@ -91,6 +91,8 @@ func TestMeasureRPCMatchesSerializedBytes(t *testing.T) {
 					}
 				case 2:
 					k = publish
+				case 10:
+					k = partial
 				case 3:
 					expected[overhead] += uint64(len(field) - len(value))
 					visitFields(t, value, func(num protowire.Number, field, _ []byte) {
@@ -143,6 +145,28 @@ func visitFields(t *testing.T, data []byte, visit func(protowire.Number, []byte,
 		}
 		visit(num, data[:tagLen+n], value)
 		data = data[tagLen+n:]
+	}
+}
+
+func partialRPC() *pubsub.RPC {
+	return &pubsub.RPC{RPC: pb.RPC{Partial: &pb.PartialMessagesExtension{
+		TopicID: proto.String("blocks"), GroupID: []byte("group"),
+		PartialMessage: bytes.Repeat([]byte{1}, 300), PartsMetadata: []byte("meta"),
+	}}}
+}
+
+func TestMeasurePartial(t *testing.T) {
+	rpc := partialRPC()
+	got := measureRPC(rpc)
+	field := encoded(t, rpc.Partial)
+	if want := uint64(1 + prefixLen(len(field)) + len(field)); got.kindBytes[partial] != want {
+		t.Fatalf("partial bytes = %d, want %d", got.kindBytes[partial], want)
+	}
+	if want := (pmBytes{message: 300, metadata: 4, header: 11}); got.pm != want {
+		t.Fatalf("pm = %+v, want %+v", got.pm, want)
+	}
+	if got.messages[partial] != 1 || got.kindBytes[other] != 0 {
+		t.Fatalf("partial messages = %d, other bytes = %d", got.messages[partial], got.kindBytes[other])
 	}
 }
 

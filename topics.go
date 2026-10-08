@@ -18,7 +18,10 @@ type topicKey struct {
 	kind  kind
 	topic string
 }
-type topicCounters struct{ bytes, ids uint64 }
+type topicCounters struct {
+	bytes, ids uint64
+	pm         pmBytes
+}
 
 func (t *Tracer) publishedTopics(rpc *pubsub.RPC) []idTopic {
 	var result []idTopic
@@ -112,6 +115,9 @@ func attributeRPC(rpc *pubsub.RPC, measured counters, resolve func(string) strin
 			emit(prune, msg.GetTopicID(), encodedFieldSize(4, msg), 0)
 		}
 	}
+	if p := rpc.Partial; p != nil {
+		emit(partial, p.GetTopicID(), encodedFieldSize(10, p), 0)
+	}
 	for _, k := range []kind{overhead, other} {
 		if measured.kindBytes[k] != 0 {
 			emit(k, "", measured.kindBytes[k], 0)
@@ -145,16 +151,23 @@ func (t *Tracer) logTopicWindows(current, previous map[topicKey]topicCounters, e
 		topic string
 		event event
 	}
-	groups := make(map[group][kindCount]uint64)
+	type window struct {
+		kinds [kindCount]uint64
+		pm    pmBytes
+	}
+	groups := make(map[group]window)
 	for key, c := range current {
 		delta := c.bytes - previous[key].bytes
 		if delta == 0 {
 			continue
 		}
 		g := group{key.topic, key.event}
-		counts := groups[g]
-		counts[key.kind] += delta
-		groups[g] = counts
+		w := groups[g]
+		w.kinds[key.kind] += delta
+		if key.kind == partial {
+			w.pm = c.pm.minus(previous[key].pm)
+		}
+		groups[g] = w
 	}
 	keys := slices.Collect(maps.Keys(groups))
 	slices.SortFunc(keys, func(a, b group) int {
@@ -164,17 +177,20 @@ func (t *Tracer) logTopicWindows(current, previous map[topicKey]topicCounters, e
 		return int(a.event - b.event)
 	})
 	for _, key := range keys {
-		counts := groups[key]
+		w := groups[key]
 		var total uint64
 		attrs := []slog.Attr{
 			slog.String("topic", key.topic), slog.String("event", eventNames[key.event]),
 			slog.Float64("interval_ms", float64(elapsed)/float64(time.Millisecond)),
 		}
-		for k, bytes := range counts {
+		for k, bytes := range w.kinds {
 			total += bytes
 			if bytes != 0 {
 				attrs = append(attrs, slog.Uint64(kindNames[k]+"_bytes", bytes))
 			}
+		}
+		if w.kinds[partial] != 0 {
+			attrs = append(attrs, pmAttrs("", w.kinds[partial], w.pm)...)
 		}
 		attrs = append(attrs, slog.Uint64("bytes", total), slog.Float64("bytes_per_second", float64(total)/elapsed.Seconds()))
 		if final {

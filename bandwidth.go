@@ -2,6 +2,7 @@ package gossipsubtrace
 
 import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	pb "github.com/libp2p/go-libp2p-pubsub/pb"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
@@ -17,6 +18,7 @@ const (
 	idontwant
 	graft
 	prune
+	partial
 	overhead
 	other
 	kindCount
@@ -24,7 +26,29 @@ const (
 
 var kindNames = [kindCount]string{
 	"publish", "subscribe", "unsubscribe", "ihave", "iwant", "idontwant",
-	"graft", "prune", "overhead", "other",
+	"graft", "prune", "partial", "overhead", "other",
+}
+
+// pmBytes holds raw partial-message field values, without protobuf framing.
+// The encoded extension size is the partial kind's byte count.
+type pmBytes struct{ message, metadata, header uint64 }
+
+func measurePartial(p *pb.PartialMessagesExtension) pmBytes {
+	return pmBytes{
+		message:  uint64(len(p.GetPartialMessage())),
+		metadata: uint64(len(p.GetPartsMetadata())),
+		header:   uint64(len(p.GetTopicID()) + len(p.GetGroupID())),
+	}
+}
+
+func (p *pmBytes) add(q pmBytes) {
+	p.message += q.message
+	p.metadata += q.metadata
+	p.header += q.header
+}
+
+func (p pmBytes) minus(q pmBytes) pmBytes {
+	return pmBytes{p.message - q.message, p.metadata - q.metadata, p.header - q.header}
 }
 
 func encodedFieldSize(field protowire.Number, message proto.Message) uint64 {
@@ -33,8 +57,9 @@ func encodedFieldSize(field protowire.Number, message proto.Message) uint64 {
 
 // measureRPC counts each known message together with its enclosing protobuf
 // field tag and length. Shared control-envelope framing and the RPC length
-// prefix go to overhead. Extensions and unknown fields go to other, preserving
-// the invariant that the breakdown sums to the complete encoded RPC size.
+// prefix go to overhead. The partial-message extension goes to partial. Other
+// extensions and unknown fields go to other, preserving the invariant that the
+// breakdown sums to the complete encoded RPC size.
 func measureRPC(rpc *pubsub.RPC) counters {
 	var c counters
 	size := proto.Size(&rpc.RPC)
@@ -74,6 +99,10 @@ func measureRPC(rpc *pubsub.RPC) counters {
 			add(idontwant, 5, message)
 			c.messageIDs[idontwant] += uint64(len(message.GetMessageIDs()))
 		}
+	}
+	if p := rpc.Partial; p != nil {
+		add(partial, 10, p)
+		c.pm = measurePartial(p)
 	}
 	var attributed uint64
 	for _, bytes := range c.kindBytes {
